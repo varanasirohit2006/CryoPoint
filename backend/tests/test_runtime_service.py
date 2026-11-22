@@ -256,6 +256,8 @@ async def test_web_and_amazon_tasks_always_have_visible_browser_and_manual_handl
             captured_sessions.append(self)
 
     monkeypatch.setattr("jit_ui.runtime.service.explore", learned)
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
     runtime = RuntimeService(settings(tmp_path), session_factory=CapturingBrowser, provider_factory=lambda *args: object())
 
     # Task with interactive=False (default) on web
@@ -273,4 +275,13 @@ async def test_web_and_amazon_tasks_always_have_visible_browser_and_manual_handl
     assert len(captured_sessions) == 2
     assert captured_sessions[1].browser_settings.browser_headless is False
     assert captured_sessions[1].manual_handler is not None
+
+    # In CI, ensure headless remains True to protect headless Linux runners
+    monkeypatch.setenv("CI", "true")
+    ci_task = TaskRequest(site_id="web", goal_id="web_search", target_url="https://example.com/",
+                          task="Search CI", parameters={"query": "ci"}, interactive=False, mode="cold")
+    await runtime.execute(RunRecord(request=ci_task))
+    assert len(captured_sessions) == 3
+    assert captured_sessions[2].browser_settings.browser_headless is True
+    assert captured_sessions[2].manual_handler is not None
     runtime.repository.close()
