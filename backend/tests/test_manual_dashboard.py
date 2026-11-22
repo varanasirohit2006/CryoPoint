@@ -2,15 +2,26 @@
 import copy
 import json
 import os
+import socket
 from urllib.parse import urlparse
 
 import pytest
 from playwright.async_api import async_playwright
 
 
+def _dashboard_available() -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", 5173), timeout=0.2):
+            return True
+    except (OSError, TimeoutError):
+        return False
+
+
 @pytest.mark.skipif(os.environ.get("JIT_RUN_BROWSER_TESTS") != "1", reason="Enable routed dashboard browser tests")
 @pytest.mark.parametrize("compile_workflow", [True, False])
 async def test_retry_with_browser_preserves_task_and_provider_and_selects_the_new_run(tmp_path, compile_workflow):
+    if not _dashboard_available():
+        pytest.skip("Dashboard dev server is not running at http://127.0.0.1:5173/")
     request = {"site_id":"web", "goal_id":"web_search", "task":"Search Google for sample topic",
         "parameters":{"query":"sample topic"}, "provider":"ollama", "mode":"auto", "interactive":False,
         "target_url":"https://www.google.com/", "automation_id":"test-set", "compile_workflow":compile_workflow}
