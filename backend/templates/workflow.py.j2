@@ -1,0 +1,75 @@
+# Generated deterministic workflow. Requires Python 3.11+ and Playwright Chromium.
+# Usage: python workflow.py --parameters '{"query": "backpacks"}'
+# Model-based healing is available in the project runtime only.
+
+{{ browser_helpers }}
+
+{{ parameter_helpers }}
+
+import argparse
+import asyncio
+import json
+from playwright.async_api import async_playwright
+
+WORKFLOW = json.loads({{ workflow_literal }})
+SITE = json.loads({{ site_literal }})
+
+
+async def run_workflow(page, parameters):
+    SITE.pop("_submitted_searches", None)
+    SITE.pop("_activated_controls", None)
+    parameters = validate_parameter_values(parameters, WORKFLOW["parameters"])
+    bound_query = WORKFLOW.get("metadata", {}).get("inspection_bound_query")
+    if bound_query is not None and parameters.get("query") != bound_query:
+        raise StepExecutionError("This workflow inspected products or selected facets specific to its learning query. Learn the new query in the dashboard.")
+    for name, learned_value in WORKFLOW.get("metadata", {}).get("fixed_filter_values", {}).items():
+        if parameters.get(name) != learned_value:
+            raise StepExecutionError("This export learned a fixed " + name + " filter. Learn the new value in the dashboard.")
+    first_action = next((action for step in WORKFLOW["steps"] for action in step["actions"]), None)
+    if first_action and first_action["action"] != "goto" and not permitted_url(page.url, SITE):
+        await apply_action(page, {"action": "goto", "url": SITE["start_url"]}, parameters, SITE)
+    for step in WORKFLOW["steps"]:
+        try:
+            for action in step["actions"]:
+                if SITE["site_id"] == "web" and action.get("requires_confirmation"):
+                    raise StepExecutionError("This final action requires review and approval in the dashboard.")
+                await apply_action(page, action, parameters, SITE)
+            if not await check_conditions(page, step.get("post_conditions", []), parameters, SITE):
+                raise StepExecutionError("Post-condition failed.")
+        except SiteBlockedError:
+            raise
+        except Exception as error:
+            raise StepExecutionError("Step " + step["step_id"] + " failed: " + str(error)) from error
+    passed, result = await verify_goal(page, SITE, WORKFLOW["goal_id"], parameters)
+    if not passed:
+        raise StepExecutionError("Final goal verification failed.")
+    return result
+
+
+async def main():
+    parser = argparse.ArgumentParser(description="Run a compiled deterministic browser workflow.")
+    parser.add_argument("--parameters", required=True, help="Typed workflow parameters as a JSON object.")
+    parser.add_argument("--headed", action="store_true", help="Show the browser window.")
+    arguments = parser.parse_args()
+    parameters = json.loads(arguments.parameters)
+    if not isinstance(parameters, dict):
+        parser.error("--parameters must be a JSON object")
+    parameters = validate_parameter_values(parameters, WORKFLOW["parameters"])
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=not arguments.headed)
+        try:
+            page = await browser.new_page()
+            result = await run_workflow(page, parameters)
+            print(json.dumps({"status": "SUCCEEDED", "result": result}, ensure_ascii=False))
+        except SiteBlockedError as error:
+            print(json.dumps({"status": "BLOCKED", "error": str(error)}))
+            raise SystemExit(2) from error
+        except StepExecutionError as error:
+            print(json.dumps({"status": "FAILED", "error": str(error)}))
+            raise SystemExit(1) from error
+        finally:
+            await browser.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

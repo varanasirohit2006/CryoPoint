@@ -1,0 +1,16 @@
+{
+  "name": "jit-ui-agent",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": ["frontend", "chaos_testbed/web"],
+  "scripts": {
+    "dev": "concurrently -n dashboard,testbed -c cyan,magenta \"npm run dev:dashboard\" \"npm run dev:testbed\"",
+    "dev:dashboard": "npm run dev --workspace @jit-ui/dashboard",
+    "dev:testbed": "npm run dev --workspace @jit-ui/chaos-web",
+    "build": "npm run build --workspaces --if-present",
+    "check": "npm run typecheck && npm run build",
+    "typecheck": "npm run typecheck --workspaces --if-present"
+  },
+  "devDependencies": { "concurrently": "^9.1.2" },
+  "engines": { "node": ">=22.12.0" }
+}
