@@ -402,11 +402,12 @@ class RuntimeService:
                 if workflow and run.request.site_id == "web":
                     run.request.completion_conditions = [condition.model_copy(deep=True) for condition in workflow.goal_conditions]
                     site["completion_conditions"] = workflow.metadata.get("completion_conditions", [])
-                browser_settings = self.settings.model_copy(update={"browser_headless": False}) if run.request.interactive else self.settings
+                always_visible = run.request.site_id in ("web", "amazon_in")
+                browser_settings = self.settings.model_copy(update={"browser_headless": False}) if run.request.interactive or always_visible else self.settings
                 session = self.session_factory(browser_settings, run_dir, site)
                 if run.request.site_id == "web":
                     session.confirmation_handler = review_action
-                if run.request.interactive:
+                if run.request.interactive or always_visible:
                     session.manual_handler = review_action
                 first_action = next((action for step in workflow.steps for action in step.actions), None) if workflow else None
                 if run.request.site_id == "web" or (first_action and first_action.action == "goto"):

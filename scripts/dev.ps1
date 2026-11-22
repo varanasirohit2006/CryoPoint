@@ -50,7 +50,8 @@ $jitStarted = @()
 $jitKeepRunning = $false
 try {
     foreach ($jitDefinition in $jitDefinitions) {
-        $jitProcess = Start-Process -FilePath $jitDefinition.executable -ArgumentList $jitDefinition.arguments -WorkingDirectory $jitProject -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $jitLogs ($jitDefinition.name + '.out.log')) -RedirectStandardError (Join-Path $jitLogs ($jitDefinition.name + '.err.log'))
+        $windowStyle = if ($jitDefinition.name -eq 'runtime-api') { 'Minimized' } else { 'Hidden' }
+        $jitProcess = Start-Process -FilePath $jitDefinition.executable -ArgumentList $jitDefinition.arguments -WorkingDirectory $jitProject -WindowStyle $windowStyle -PassThru -RedirectStandardOutput (Join-Path $jitLogs ($jitDefinition.name + '.out.log')) -RedirectStandardError (Join-Path $jitLogs ($jitDefinition.name + '.err.log'))
         $jitStarted += @{ name = $jitDefinition.name; pid = $jitProcess.Id; started_at = $jitProcess.StartTime.ToUniversalTime().ToString('o') }
     }
     @{ project_root = $jitProject; services = $jitStarted } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $jitStatePath -Encoding utf8

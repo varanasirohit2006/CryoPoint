@@ -36,7 +36,9 @@ def interpretation_prompt(task):
         "Interpret the complete user browser request into requested outcomes and search data. "
         "Return only JSON with search_query (null when there is no search) and objectives. "
         "The query contains only what belongs in a search field, never later operations such as pressing Subscribe, "
-        "opening a result, saving, or sharing. Preserve quoted search terms, even when they contain action words. "
+        "converting, uploading, downloading, opening a result, saving, or sharing. Preserve quoted search terms, even when they contain action words. "
+        "If the destination URL is already the dedicated tool or converter and no search is needed, set search_query to null. "
+        "Omit conversational remarks such as 'please fix it' or 'thank you' from objectives. "
         "Include every requested outcome in objectives, including actions after searching. Describe what must be achieved; "
         "do not invent selectors, URLs, credentials, browser actions, or a fixed website procedure. "
         "Explicit parameter values are authoritative. Derived parameters are hints; correct them when they include instructions. "
@@ -65,5 +67,7 @@ def apply_interpretation(task, interpreted):
     parameters = dict(task.parameters)
     if interpreted.search_query is not None and (task.parameter_source != "explicit" or not parameters.get("query")):
         parameters["query"] = interpreted.search_query
+    elif interpreted.search_query is None and task.parameter_source != "explicit":
+        parameters.pop("query", None)
     result = task.model_copy(update={"parameters":parameters, "objectives":interpreted.objectives})
     return result.model_copy(update={"intent_key":web_intent_key(result)})

@@ -1,8 +1,26 @@
-# JIT-UI
+# CryoPoint (JIT-UI)
 
-Learn a browser workflow through visual exploration, compile the successful trace into reusable Python, run it with new parameters, and repair a failed logical step when the interface changes.
+> **Self-Compiling Computer-Use Browser Agent**
+> *Cold Vision In. Indestructible Code Out.*
 
-This local portfolio project includes a React dashboard, seeded shopping and order testbeds, persistent workflow versions, deterministic replay/export, and reproducible evaluation. Gemini and Ollama perform real visual inference; the separately selected Offline simulation provider uses scripted decisions and is labelled throughout the UI and reports.
+Learn any browser workflow through visual exploration (VLM), compile the successful action trace into reusable standalone Python code, replay it deterministically with new parameters at **0 token cost**, and surgically repair failed steps when the interface changes.
+
+---
+
+## 🌟 Key Features
+
+* **4-Phase JIT Lifecycle:**
+  1. **Cold Exploration:** Visual AI models (Gemini 3.5 Flash or local Ollama Qwen3-VL) navigate novel websites using Set-of-Mark (SoM) visual badges.
+  2. **JIT Compilation:** Reversible read-only cycles are pruned, 4-tier resilient locators (`testid` $\to$ `role+name` $\to$ `label/text` $\to$ `css/xpath`) are generated, and dynamic parameters are extracted into standalone Playwright scripts (`workflow.py`).
+  3. **Hot Replay:** Cached intent signatures replay instantly with zero LLM inference calls and 0 token cost.
+  4. **Surgical Self-Healing:** Freezes execution at step $k$ upon DOM drift or modal obstacles, performs a scoped visual repair, commits a new version ($v_{n+1}$), and resumes.
+* **Interactive Desktop Browser Window:** Automatic visible Chromium browser window pops up maximized on your screen, allowing you to watch live automation as it happens.
+* **Human-in-the-Loop "I am not a robot" / CAPTCHA Handling:** When an anti-bot challenge or Cloudflare check is encountered, the agent pauses gracefully, notifies you with a screenshot in the dashboard, lets you solve it in the visible browser, and resumes with one click.
+* **Smart Domain Typo Correction & DNS Recovery:** Automatically corrects common URL typos (`youtbe.com` $\to$ `youtube.com`, `goole.com` $\to$ `google.com`, `amzon.in` $\to$ `amazon.in`) and catches `net::ERR_NAME_NOT_RESOLVED` with friendly diagnostic recovery.
+* **Permitted Public Web Navigation:** Supports unrestricted public web navigation, handling relative URLs, HTML5 detached form buttons (`form="id"`), button `formaction` overrides, and SVG links without false-positive security blocks.
+* **Multi-Step & Compound Objectives:** Understands chained tasks (such as uploading files, converting documents, and downloading outputs) and executes them sequentially.
+
+---
 
 ## Quick start
 
@@ -10,45 +28,33 @@ From the project directory in PowerShell, with Python 3.12+ and Node 22.12+:
 
 ```powershell
 .\scripts\setup.ps1
-# Configure the existing .env for your selected provider.
+# Configure your JIT_GEMINI_API_KEY in .env
 .\scripts\dev.ps1
 ```
 
-Setup preserves an existing `.env`. Set `JIT_GEMINI_API_KEY` to use the selected Gemini model, or start Ollama with `qwen3-vl:2b-instruct`. Providers are selected explicitly; the app does not switch to another model or simulation automatically. Optional `setup.ps1 -Semantic` provisions Chroma/MiniLM locally; the default router uses lexical similarity.
+* Open the dashboard at **http://127.0.0.1:5173**.
+* Local shopping and admin testbed apps: **http://127.0.0.1:3000/shop** and **http://127.0.0.1:3000/admin**.
+* Runtime API documentation: **http://127.0.0.1:8000/docs**.
 
-Open the dashboard at **http://127.0.0.1:5173**. The local shopping and admin apps are at **http://127.0.0.1:3000/shop** and **http://127.0.0.1:3000/admin**. Runtime API documentation: **http://127.0.0.1:8000/docs**.
+Press `Ctrl+C` in the terminal to stop all services, or run `.\scripts\stop.ps1`.
 
-Ctrl+C stops the four services. `dev.ps1 -Detach` runs them in the background; `stop.ps1` stops recorded project processes. `dev.ps1 -Preview` serves the frontends after `npm.cmd run build` if the development optimizer cannot run in your shell.
+---
 
-For a first offline check choose **Offline simulation**, run the shopping example, change its product parameters, and run again. The second run should be `HOT` with zero model calls. Use the Chaos Lab controls to mutate the local UI, then repeat and inspect the repair version.
+## Project Organization
 
-Choose **Any website** and enter a URL plus your task. With Gemini or Ollama selected, every cache miss uses the LLM to choose each next action from the current page. There are no automatic site-specific search, language, or popup sequences. Successful model-chosen traces compile into workflows that Automatic mode can replay; the completed-run view and automation ledger show measured tokens and estimated savings. Legacy native workflows are excluded from routing.
+- `backend/`: Typed contracts, provider adapters (Gemini, Ollama, Fixture), browser session & CDP tracer, compiler, router, runtime, and SQLite repository.
+- `frontend/`: React + TypeScript dashboard (Workbench, Workflow Library with version diffs, and Token Ledger).
+- `chaos_testbed/`: Seeded shopping/admin storefront with 6 injectable mutation classes (selector drift, spatial shift, copy mutations, nesting, obstacle modals, and compound).
+- `benchmarks/`: Automated 50-trial matrix runner and report generator (latency charts, counterfactual token savings).
+- `scripts/`: Dev lifecycle, diagnostics, and test scripts (`dev.ps1`, `stop.ps1`, `restart_runtime.ps1`, `check.ps1`, etc.).
+- `docs/`: Architecture blueprints, evaluation methodology, setup guides, and verification reports.
 
-Optional login popups are visible to the model, which can dismiss them or request a manual step. Enable the visible browser for required login/verification; final booking/payment actions require approval. The separate Amazon search preset limits actions to public shopping. Live website results are variable and kept separate from reproducible local benchmarks.
+---
 
-Temporary server/traffic errors are shown to the LLM for bounded recovery, including waits and revisiting relevant URLs. They are not treated as manual-verification walls. Persistent outages stop with a temporary-site error and never publish a successful workflow.
-
-## Project organization
-
-- `backend/`: typed contracts, provider adapters, browser tracing, compiler, router, runtime, and SQLite storage.
-- `frontend/`: React dashboard.
-- `chaos_testbed/`: seeded shopping/admin application and mutation API.
-- `benchmarks/`: repeatable evaluation and report generation.
-- `scripts/`: setup, development launch, and verification helpers.
-- `docs/`: original problem statements, architecture, setup, evaluation, and demo guide.
-- `.data/`: ignored databases, downloaded browser/embedding files, traces, screenshots, and reports.
-
-Read [plan.md](plan.md) for scope, milestones, and acceptance criteria. Source documents are preserved under [docs/problem-statement](docs/problem-statement/).
-
-Guides: [setup](docs/setup.md), [architecture](docs/architecture.md), [four-act demo](docs/demo.md), [evaluation methodology](docs/evaluation.md), and [current verification](docs/verification.md).
-
-## Checks
+## Quality & Checks
 
 ```powershell
 .\scripts\check.ps1
-# With the four services running:
-.\scripts\check.ps1 -BrowserSmoke
-.venv\Scripts\python.exe benchmarks\run_suite.py --provider fixture --trials 5
+# Run full browser tests:
+$env:JIT_RUN_BROWSER_TESTS="1"; .venv\Scripts\pytest.exe backend\tests
 ```
-
-The benchmark writes measured JSON/CSV/HTML/SVG reports under `.data/benchmarks/`, labels simulations, restores workflow baselines between cases, and verifies patched workflows with new parameters. Real inference claims require Gemini/Ollama trials; no target performance number is presented as achieved without measurements.

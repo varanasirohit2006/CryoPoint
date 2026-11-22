@@ -1,10 +1,18 @@
 """Registered goals define outcomes, never prewritten browser action sequences."""
 
+from urllib.parse import urlsplit
+
 from jit_ui.config import Settings
 from jit_ui.domain.models import ParameterSpec, TaskRequest
 from jit_ui.routing import validate_parameters
 from jit_ui.domain.intent import resolve_amazon_request
-from jit_ui.domain.web_tasks import is_language_request, resolve_web_request, task_site
+from jit_ui.domain.web_tasks import (
+    infer_target_url,
+    is_language_request,
+    normalize_target_url,
+    resolve_web_request,
+    task_site,
+)
 
 
 def site_definitions(settings: Settings) -> dict[str, dict]:
@@ -47,8 +55,26 @@ def public_sites(settings: Settings) -> list[dict]:
     return result
 
 
+def _has_external_web_target(task: TaskRequest) -> bool:
+    if task.site_id == "web":
+        return True
+    if task.target_url:
+        try:
+            target = normalize_target_url(task.target_url)
+            host = (urlsplit(target).hostname or "").lower()
+            return host not in {"amazon.in", "www.amazon.in", "localhost", "127.0.0.1"}
+        except ValueError:
+            return False
+    try:
+        target = infer_target_url(task)
+        host = (urlsplit(target).hostname or "").lower()
+        return host not in {"amazon.in", "www.amazon.in", "localhost", "127.0.0.1"}
+    except ValueError:
+        return False
+
+
 def validate_task(task: TaskRequest, settings: Settings) -> TaskRequest:
-    if task.site_id == "web" or (task.site_id == "amazon_in" and is_language_request(task)):
+    if task.site_id == "web" or _has_external_web_target(task) or (task.site_id == "amazon_in" and is_language_request(task)):
         resolved = resolve_web_request(task)
         return validate_task(resolved, settings) if resolved.site_id == "amazon_in" else resolved
     if task.site_id == "amazon_in":

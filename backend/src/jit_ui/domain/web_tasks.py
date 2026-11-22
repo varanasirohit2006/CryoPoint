@@ -7,6 +7,9 @@ from urllib.parse import urlsplit, urlunsplit
 
 from jit_ui.domain.models import ParameterSpec
 from jit_ui.domain.intent import interpret_price_query
+from jit_ui.runtime.browser_helpers import DOMAIN_TYPO_MAP, correct_domain_typo
+
+__all__ = ["DOMAIN_TYPO_MAP", "correct_domain_typo"]
 
 
 LANGUAGES = {
@@ -28,9 +31,28 @@ LANGUAGES = {
 WEB_GOALS = {"browser_task", "web_search", "change_language"}
 URL_PATTERN = re.compile(r"https?://[^\s<>\"']+", re.I)
 DOMAIN_PATTERN = re.compile(r"(?<![\w@])(?:localhost(?::\d+)?|(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}(?::\d+)?)(?:/[^\s<>\"']*)?", re.I)
-SEARCH_OPERATION = re.compile(r"\b(?:search(?:\s+(?:google|goole|amazon|youtube))?(?:\s+for)?|look\s+for|find\s+me)\b", re.I)
+SEARCH_OPERATION = re.compile(
+    r"\b(?:search(?:\s+(?:google|goole|gogle|gooogle|amazon|amzon|amazn|amazone|youtube|youtbe|yotube|uoutube|youtub|flipkart|flikart|github|githb|wikipedia|wikpedia))?(?:\s+for)?|look\s+for|find\s+me)\b",
+    re.I
+)
 LANGUAGE_OPERATION = re.compile(r"\b(?:change|switch|set|select|choose)\b", re.I)
-FOLLOW_ON_OPERATION = re.compile(r"(?:\b(?:and(?:\s+then)?|then)\s+|[.,;]\s*|\n\s*)(?:buy|purchase|book|reserve|pay|confirm|checkout|check\s+out|order|apply|save|delete|cancel|open|click|press|tap|type|enter|select|add|go|change|switch|download|fill|complete|submit|send|search|look\s+for|find\s+me|subscribe|unsubscribe|follow|unfollow|like|share|play|watch|compare)\b", re.I)
+GLUED_PREPOSITION_DOMAIN = re.compile(
+    r"\b(?:in|on|at|to|open|visit|goto)\s+the([a-z0-9-]+\.[a-z]{2,}(?:/[^\s<>\"']*)?)",
+    re.I
+)
+
+FOLLOW_ON_TRANSITIONS = r"(?:and(?:\s+(?:then|also|now|after(?:\s+(?:this|that|which))?|afterwards|next|subsequently|finally))?|then|also|now|later|after(?:\s+(?:this|that|which))?|afterwards|next|subsequently|finally)"
+FOLLOW_ON_VERBS = (
+    r"buy|purchase|book|reserve|pay|confirm|checkout|check\s+out|order|apply|save|delete|remove|cancel|clear|"
+    r"open|view|read|click|press|tap|type|enter|input|select|pick|choose|add|insert|go|navigate|visit|"
+    r"change|switch|set|download|upload|convert|transform|use|attach|import|export|extract|generate|create|"
+    r"fill|complete|submit|send|search|look\s+for|find\s+me|find|"
+    r"subscribe|unsubscribe|follow|unfollow|like|share|play|watch|listen|pause|stop|resume|compare|scroll|wait"
+)
+FOLLOW_ON_OPERATION = re.compile(
+    r"(?:\b" + FOLLOW_ON_TRANSITIONS + r"\s+|[.,;]\s*(?:" + FOLLOW_ON_TRANSITIONS + r"\s+)?|\n\s*)(?:" + FOLLOW_ON_VERBS + r")\b",
+    re.I
+)
 
 
 def normalize_target_url(value):
@@ -51,6 +73,7 @@ def normalize_target_url(value):
         if parsed.username is not None or parsed.password is not None:
             raise ValueError("Website URLs must not contain credentials.")
         host = parsed.hostname.encode("idna").decode("ascii").lower()
+        host = correct_domain_typo(host)
         try:
             ipaddress.ip_address(host)
         except ValueError:
@@ -70,15 +93,27 @@ def normalize_target_url(value):
 def infer_target_url(task):
     if task.target_url:
         return normalize_target_url(task.target_url)
-    match = URL_PATTERN.search(task.task) or DOMAIN_PATTERN.search(task.task)
+    match = URL_PATTERN.search(task.task) or re.search(r"www\.[^\s<>\"']+", task.task, re.I)
     if match:
         return normalize_target_url(match.group().rstrip(".,;!)"))
-    if task.site_id == "amazon_in" or re.search(r"\bamazon\b", task.task, re.I):
+    glued = GLUED_PREPOSITION_DOMAIN.search(task.task)
+    if glued:
+        return normalize_target_url(glued.group(1).rstrip(".,;!)"))
+    match = DOMAIN_PATTERN.search(task.task)
+    if match:
+        return normalize_target_url(match.group().rstrip(".,;!)"))
+    if task.site_id == "amazon_in" or re.search(r"\b(?:amazon|amzon|amazn|amazone)\b", task.task, re.I):
         return "https://www.amazon.in/"
-    if re.search(r"\b(?:google|goole)\b", task.task, re.I):
+    if re.search(r"\b(?:google|goole|gogle|gooogle)\b", task.task, re.I):
         return "https://www.google.com/"
-    if re.search(r"\byoutube\b", task.task, re.I):
+    if re.search(r"\b(?:youtube|youtbe|yotube|uoutube|youtub)\b", task.task, re.I):
         return "https://www.youtube.com/"
+    if re.search(r"\b(?:flipkart|flikart)\b", task.task, re.I):
+        return "https://www.flipkart.com/"
+    if re.search(r"\b(?:github|githb)\b", task.task, re.I):
+        return "https://github.com/"
+    if re.search(r"\b(?:wikipedia|wikpedia)\b", task.task, re.I):
+        return "https://www.wikipedia.org/"
     raise ValueError("Specify the website URL in the task or target URL field.")
 
 
@@ -86,6 +121,8 @@ def _instruction_text(text):
     # URLs can themselves contain words such as /search or /change-language.
     # Mask them for intention detection while preserving match positions.
     text = URL_PATTERN.sub(lambda match: " " * len(match.group()), text)
+    text = re.sub(r"www\.[^\s<>\"']+", lambda match: " " * len(match.group()), text, flags=re.I)
+    text = GLUED_PREPOSITION_DOMAIN.sub(lambda match: " " * len(match.group()), text)
     text = DOMAIN_PATTERN.sub(lambda match: " " * len(match.group()), text)
     return re.sub(r'"[^"\n]*"|\u201c[^\u201d\n]*\u201d|(?<!\w)\x27[^\x27\n]*\x27(?!\w)', lambda match: " " * len(match.group()), text)
 
@@ -127,10 +164,11 @@ def _search_query(task):
     supplied = task.parameters.get("query")
     instruction = _instruction_text(task.task)
     operation = SEARCH_OPERATION.search(instruction)
-    query = task.task[operation.end():].lstrip(" \t:=-").strip(" .,!?;\"'") if operation else None
+    remainder = task.task[operation.end():] if operation else ""
     # A request that continues with another browser operation stays a generic task.
-    if query and task.goal_id != "web_search" and re.search(r"\b(?:and|then)\s+(?:buy|purchase|book|reserve|pay|confirm|open|click|select|add|go|change|download|fill|complete|submit|send)\b", query, re.I):
+    if remainder and task.goal_id != "web_search" and FOLLOW_ON_OPERATION.search(_instruction_text(remainder)):
         return None
+    query = remainder.lstrip(" \t:=-").strip(" .,!?;\"'") if operation else None
     if task.parameter_source == "explicit" and supplied is not None and (task.goal_id == "web_search" or operation):
         supplied_text = " ".join(str(supplied).strip(" .,!?;\"'").split())
         if SEARCH_OPERATION.search(_instruction_text(supplied_text)) and re.match(r"^(?:please\s+)?(?:go\s+to|open|visit|search|look\s+for|find\s+me)\b", supplied_text, re.I):
@@ -138,9 +176,14 @@ def _search_query(task):
         return supplied_text
     if not operation:
         return str(supplied).strip() if supplied is not None and task.goal_id == "web_search" else None
-    query = re.sub(r"\s+on\s+(?:the\s+)?(?:google|goole|amazon|youtube)(?:\.[a-z.]+)?\s*$", "", query, flags=re.I)
-    query = re.sub(r"\s+on\s+https?://[^\s]+\s*$", "", query, flags=re.I)
-    query = re.sub(r"\s+on\s+(?:www\.)?(?:[a-z0-9-]+\.)+[a-z]{2,}(?:/[^\s]*)?\s*$", "", query, flags=re.I)
+    query = re.sub(
+        r"\s+(?:on|in|at)\s+(?:the\s+)?(?:google|goole|gogle|gooogle|amazon|amzon|amazn|amazone|youtube|youtbe|yotube|uoutube|youtub|flipkart|flikart|github|githb|wikipedia|wikpedia)(?:\.[a-z.]+)?\s*$",
+        "",
+        query,
+        flags=re.I
+    )
+    query = re.sub(r"\s+(?:on|in|at)\s+https?://[^\s]+\s*$", "", query, flags=re.I)
+    query = re.sub(r"\s+(?:on|in|at)\s+(?:www\.)?(?:[a-z0-9-]+\.)+[a-z]{2,}(?:/[^\s]*)?\s*$", "", query, flags=re.I)
     return " ".join(query.strip(" .,!?;\"'").split())
 
 
@@ -164,11 +207,23 @@ def _search_parameters(task, query):
 
 
 def _compound_details(task, language_request):
+    if _named_control(task.task):
+        return False, dict(task.parameters)
     instruction = _instruction_text(task.task)
     search = SEARCH_OPERATION.search(instruction)
     language = LANGUAGE_OPERATION.search(instruction) if language_request else None
     primary = min((match.start() for match in (search, language) if match), default=None)
-    following = [match for match in FOLLOW_ON_OPERATION.finditer(instruction) if primary is not None and match.start() > primary]
+    if primary is not None:
+        following = [match for match in FOLLOW_ON_OPERATION.finditer(instruction) if match.start() > primary]
+    else:
+        matches = list(FOLLOW_ON_OPERATION.finditer(instruction))
+        initial_verb = re.search(r"\b(?:" + FOLLOW_ON_VERBS + r")\b", instruction, re.I)
+        if initial_verb and matches:
+            following = [match for match in matches if match.start() > initial_verb.start()]
+        elif len(matches) >= 2:
+            following = matches[1:]
+        else:
+            following = []
     if not following:
         return False, dict(task.parameters)
     parameters = dict(task.parameters)
@@ -225,8 +280,8 @@ def web_intent_key(task):
         text = task.task
         for name, value in sorted(task.parameters.items(), key=lambda item: len(str(item[1])), reverse=True):
             if value is not None and not isinstance(value, bool) and str(value).strip():
-                text = re.sub(r"(?<!\w)" + re.escape(str(value)) + r"(?!\w)",
-                              lambda _match, parameter=name: "<" + parameter + ">", text, flags=re.I)
+                pattern = r"(?<!\w)" + r"\s+".join(re.escape(part) for part in str(value).split()) + r"(?!\w)"
+                text = re.sub(pattern, lambda _match, parameter=name: "<" + parameter + ">", text, flags=re.I)
         signature += ":" + " ".join(text.lower().split())
     return "web:" + authority + ":" + signature
 

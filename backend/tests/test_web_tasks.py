@@ -5,7 +5,7 @@ import pytest
 from jit_ui.config import Settings
 from jit_ui.domain.models import ActionSpec, ConditionSpec, LocatorSpec, ProviderResponse, RunRecord, RunStatus, TaskRequest
 from jit_ui.domain.sites import public_sites, task_site, validate_task
-from jit_ui.domain.web_tasks import normalize_target_url, parameter_specs, resolve_web_request, web_intent_key
+from jit_ui.domain.web_tasks import needs_model_interpretation, normalize_target_url, parameter_specs, resolve_web_request, web_intent_key
 
 
 def task(text, **kwargs):
@@ -192,3 +192,330 @@ def test_completion_conditions_validate_references_and_do_not_recurse_into_goal(
                       ConditionSpec(kind="language_equals", value_ref="missing")):
         with pytest.raises(ValueError):
             resolve_web_request(task("Open https://example.org", completion_conditions=[condition]))
+
+
+def test_compound_converter_and_upload_task_resolves_search_query_and_website():
+    text = (
+        "in thehttps://www.ilovepdf.com/pdf_to_word search for i love pdf pdf to word converter "
+        "and convert the pdf to word . use the upload to upload dummy_invoice pdf in the downloads dir "
+        "and convert this pdf to  word .after this download the output word and save it in downloads.  please fix it ."
+    )
+    resolved = resolve_web_request(task(text))
+    assert resolved.target_url == "https://www.ilovepdf.com/pdf_to_word"
+    assert resolved.goal_id == "browser_task"
+    assert resolved.parameters == {"query": "i love pdf pdf to word converter"}
+    assert "<query>" in resolved.intent_key
+    assert "i love pdf pdf to word converter" not in resolved.intent_key
+    assert needs_model_interpretation(resolved)
+
+
+def test_glued_www_target_url_resolves_cleanly():
+    text = "in thewww.ilovepdf.com/pdf_to_word search for pdf to word and convert the document"
+    resolved = resolve_web_request(task(text))
+    assert resolved.target_url == "https://www.ilovepdf.com/pdf_to_word"
+    assert resolved.parameters == {"query": "pdf to word"}
+    assert resolved.goal_id == "browser_task"
+
+
+def test_glued_preposition_domain_resolves_cleanly():
+    text = "in theilovepdf.com/pdf_to_word search for pdf to word and convert the document"
+    resolved = resolve_web_request(task(text))
+    assert resolved.target_url == "https://ilovepdf.com/pdf_to_word"
+    assert resolved.parameters == {"query": "pdf to word"}
+    assert resolved.goal_id == "browser_task"
+
+
+def test_validate_task_reroutes_external_url_from_other_presets():
+    text = (
+        "in thehttps://www.ilovepdf.com/pdf_to_word search for i love pdf pdf to word converter "
+        "and convert the pdf to word . use the upload to upload dummy_invoice pdf in the downloads dir "
+        "and convert this pdf to  word .after this download the output word and save it in downloads.  please fix it ."
+    )
+    settings = Settings(_env_file=None)
+    for site_id in ("amazon_in", "shop"):
+        validated = validate_task(TaskRequest(site_id=site_id, task=text), settings)
+        assert validated.site_id == "web"
+        assert validated.target_url == "https://www.ilovepdf.com/pdf_to_word"
+        assert validated.goal_id == "browser_task"
+        assert validated.parameters == {"query": "i love pdf pdf to word converter"}
+        assert needs_model_interpretation(validated)
+
+
+def test_compound_task_without_search_needs_model_interpretation():
+    text = (
+        "in thehttps://www.ilovepdf.com/pdf_to_word convert the pdf to word . use the upload to upload dummy_invoice pdf "
+        "in the downloads dir and convert this pdf to word .after this download the output word and save it in downloads."
+    )
+    resolved = resolve_web_request(task(text))
+    assert resolved.target_url == "https://www.ilovepdf.com/pdf_to_word"
+    assert resolved.goal_id == "browser_task"
+    assert "query" not in resolved.parameters
+    assert needs_model_interpretation(resolved)
+
+
+@pytest.mark.parametrize("typo_url,expected_url", [
+    ("youtbe.com", "https://youtube.com/"),
+    ("https://youtbe.com/", "https://youtube.com/"),
+    ("www.youtbe.com", "https://www.youtube.com/"),
+    ("https://www.youtbe.com/", "https://www.youtube.com/"),
+    ("yotube.com", "https://youtube.com/"),
+    ("uoutube.com", "https://youtube.com/"),
+    ("youtub.com", "https://youtube.com/"),
+    ("goole.com", "https://google.com/"),
+    ("gogle.com", "https://google.com/"),
+    ("gooogle.com", "https://google.com/"),
+    ("www.goole.com", "https://www.google.com/"),
+    ("amzon.com", "https://amazon.com/"),
+    ("amazn.com", "https://amazon.com/"),
+    ("amazone.com", "https://amazon.com/"),
+    ("amzon.in", "https://amazon.in/"),
+    ("amazn.in", "https://amazon.in/"),
+    ("amazone.in", "https://amazon.in/"),
+    ("www.amzon.in", "https://www.amazon.in/"),
+    ("flikart.com", "https://flipkart.com/"),
+    ("www.flikart.com", "https://www.flipkart.com/"),
+    ("githb.com", "https://github.com/"),
+    ("www.githb.com", "https://www.github.com/"),
+    ("wikpedia.org", "https://wikipedia.org/"),
+    ("www.wikpedia.org", "https://www.wikipedia.org/"),
+    ("https://youtbe.com/watch?v=123", "https://youtube.com/watch?v=123"),
+    ("http://youtbe.com", "http://youtube.com/"),
+    ("http://www.youtbe.com", "http://www.youtube.com/"),
+    ("youtbe.com:8080", "https://youtube.com:8080/"),
+    ("m.youtbe.com", "https://m.youtube.com/"),
+    ("music.youtbe.com", "https://music.youtube.com/"),
+    ("en.wikpedia.org", "https://en.wikipedia.org/"),
+    ("raw.githb.com", "https://raw.github.com/"),
+])
+def test_domain_typo_correction_in_normalize_target_url(typo_url, expected_url):
+    assert normalize_target_url(typo_url) == expected_url
+
+
+@pytest.mark.parametrize("prompt,expected_url,expected_query", [
+    ("Open youtbe.com and search for songs", "https://youtube.com/", "songs"),
+    ("Search for cat videos on https://youtbe.com/", "https://youtube.com/", "cat videos"),
+    ("Search for cat videos in youtbe.com", "https://youtube.com/", "cat videos"),
+    ("Go to youtbe and search for jazz", "https://www.youtube.com/", "jazz"),
+    ("Search for laptops on flikart.com", "https://flipkart.com/", "laptops"),
+    ("Open githb.com and look for python", "https://github.com/", "python"),
+    ("Search for physics on wikpedia.org", "https://wikipedia.org/", "physics"),
+    ("Search for shoes on amzon.in", "https://www.amazon.in/", "shoes"),
+    ("Search for shoes at amzon.in", "https://www.amazon.in/", "shoes"),
+    ("Search for shoes on amzon.com", "https://amazon.com/", "shoes"),
+    ("Search for news on goole.com", "https://google.com/", "news"),
+])
+def test_infer_target_url_and_query_with_typo_domains(prompt, expected_url, expected_query):
+    resolved = resolve_web_request(task(prompt))
+    assert resolved.target_url == expected_url
+    assert resolved.parameters.get("query") == expected_query
+
+
+@pytest.mark.asyncio
+async def test_apply_action_dns_error_raises_clean_step_execution_error():
+    from unittest.mock import AsyncMock, MagicMock
+    from jit_ui.runtime.browser_helpers import StepExecutionError, apply_action
+
+    mock_page = MagicMock()
+    mock_page.url = "about:blank"
+    mock_page.title = AsyncMock(return_value="")
+    mock_page.locator = MagicMock(return_value=MagicMock(inner_text=AsyncMock(return_value=""), first=MagicMock(wait_for=AsyncMock())))
+    mock_page.goto = AsyncMock(side_effect=Exception(
+        "Page.goto: net::ERR_NAME_NOT_RESOLVED at https://unknown-nonexistent-domain.com/ Call log: - navigating..."
+    ))
+    site = {"site_id": "web", "start_url": "https://unknown-nonexistent-domain.com/", "allowed_origin": "https://unknown-nonexistent-domain.com"}
+    action = {"action": "goto", "url": "https://unknown-nonexistent-domain.com/"}
+
+    with pytest.raises(StepExecutionError) as exc_info:
+        await apply_action(mock_page, action, {}, site)
+
+    assert "Unable to resolve domain 'unknown-nonexistent-domain.com' (net::ERR_NAME_NOT_RESOLVED). Check the URL spelling and your internet connection." in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_apply_action_typo_domain_attempts_correction_and_recovers():
+    from unittest.mock import AsyncMock, MagicMock
+    from jit_ui.runtime.browser_helpers import apply_action
+
+    mock_page = MagicMock()
+    mock_page.url = "about:blank"
+    mock_page.title = AsyncMock(return_value="")
+    mock_page.locator = MagicMock(return_value=MagicMock(inner_text=AsyncMock(return_value=""), first=MagicMock(wait_for=AsyncMock())))
+    success_response = MagicMock(status=200)
+    mock_page.goto = AsyncMock(side_effect=[
+        Exception("Page.goto: net::ERR_NAME_NOT_RESOLVED at https://youtbe.com/"),
+        success_response,
+    ])
+    site = {"site_id": "web", "start_url": "https://youtbe.com/", "allowed_origin": "https://youtbe.com"}
+    action = {"action": "goto", "url": "https://youtbe.com/"}
+
+    await apply_action(mock_page, action, {}, site)
+    assert mock_page.goto.call_count == 2
+    assert mock_page.goto.call_args_list[1][0][0] == "https://youtube.com/"
+    assert action["url"] == "https://youtube.com/"
+    assert site["_document_status"] == 200
+
+
+@pytest.mark.asyncio
+async def test_apply_action_typo_domain_fails_if_corrected_also_fails():
+    from unittest.mock import AsyncMock, MagicMock
+    from jit_ui.runtime.browser_helpers import StepExecutionError, apply_action
+
+    mock_page = MagicMock()
+    mock_page.url = "about:blank"
+    mock_page.title = AsyncMock(return_value="")
+    mock_page.locator = MagicMock(return_value=MagicMock(inner_text=AsyncMock(return_value=""), first=MagicMock(wait_for=AsyncMock())))
+    mock_page.goto = AsyncMock(side_effect=[
+        Exception("Page.goto: net::ERR_NAME_NOT_RESOLVED at https://youtbe.com/"),
+        Exception("Page.goto: net::ERR_NAME_NOT_RESOLVED at https://youtube.com/"),
+    ])
+    site = {"site_id": "web", "start_url": "https://youtbe.com/", "allowed_origin": "https://youtbe.com"}
+    action = {"action": "goto", "url": "https://youtbe.com/"}
+
+    with pytest.raises(StepExecutionError) as exc_info:
+        await apply_action(mock_page, action, {}, site)
+
+    assert "Unable to resolve domain 'youtbe.com' (net::ERR_NAME_NOT_RESOLVED). Check the URL spelling and your internet connection." in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_browser_session_open_dns_error_raises_clean_browser_action_error(tmp_path):
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from jit_ui.browser.session import BrowserActionError, BrowserSession
+
+    site = {"site_id": "web", "start_url": "https://nonexistent-site-test.com/", "allowed_origin": "https://nonexistent-site-test.com"}
+    session = BrowserSession(Settings(_env_file=None), tmp_path, site)
+
+    mock_page = MagicMock()
+    mock_page.url = "about:blank"
+    mock_page.title = AsyncMock(return_value="")
+    mock_page.goto = AsyncMock(side_effect=Exception("Page.goto: net::ERR_NAME_NOT_RESOLVED at https://nonexistent-site-test.com/"))
+    mock_page.on = MagicMock()
+    mock_page.set_default_timeout = MagicMock()
+
+    with patch("playwright.async_api.async_playwright") as mock_pw:
+        pw_instance = AsyncMock()
+        pw_instance.stop = AsyncMock()
+        mock_pw.return_value.start = AsyncMock(return_value=pw_instance)
+        browser = AsyncMock()
+        browser.close = AsyncMock()
+        pw_instance.chromium.launch = AsyncMock(return_value=browser)
+        context = AsyncMock()
+        browser.new_context = AsyncMock(return_value=context)
+        context.new_page = AsyncMock(return_value=mock_page)
+        cdp = MagicMock()
+        cdp.on = MagicMock()
+        cdp.detach = AsyncMock()
+        cdp.send = AsyncMock()
+        context.new_cdp_session = AsyncMock(return_value=cdp)
+
+        with pytest.raises(BrowserActionError) as exc_info:
+            await session.open()
+
+        assert "Unable to resolve domain 'nonexistent-site-test.com' (net::ERR_NAME_NOT_RESOLVED). Check the URL spelling and your internet connection." in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_browser_session_open_typo_domain_attempts_correction_and_recovers(tmp_path):
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from jit_ui.browser.session import BrowserSession
+
+    site = {"site_id": "web", "start_url": "https://youtbe.com/", "allowed_origin": "https://youtbe.com"}
+    session = BrowserSession(Settings(_env_file=None), tmp_path, site)
+
+    mock_page = MagicMock()
+    mock_page.url = "about:blank"
+    mock_page.title = AsyncMock(return_value="")
+    mock_page.goto = AsyncMock(side_effect=[
+        Exception("Page.goto: net::ERR_NAME_NOT_RESOLVED at https://youtbe.com/"),
+        MagicMock(status=200),
+    ])
+    mock_page.on = MagicMock()
+    mock_page.set_default_timeout = MagicMock()
+
+    with patch("playwright.async_api.async_playwright") as mock_pw:
+        pw_instance = AsyncMock()
+        pw_instance.stop = AsyncMock()
+        mock_pw.return_value.start = AsyncMock(return_value=pw_instance)
+        browser = AsyncMock()
+        browser.close = AsyncMock()
+        pw_instance.chromium.launch = AsyncMock(return_value=browser)
+        context = AsyncMock()
+        browser.new_context = AsyncMock(return_value=context)
+        context.new_page = AsyncMock(return_value=mock_page)
+        cdp = MagicMock()
+        cdp.on = MagicMock()
+        cdp.detach = AsyncMock()
+        cdp.send = AsyncMock()
+        context.new_cdp_session = AsyncMock(return_value=cdp)
+
+        await session.open()
+
+        assert mock_page.goto.call_count == 2
+        assert mock_page.goto.call_args_list[1][0][0] == "https://youtube.com/"
+        assert session.site["start_url"] == "https://youtube.com/"
+        assert session.site["allowed_origin"] == "https://youtube.com"
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_browser_session_open_typo_domain_fails_if_corrected_also_fails(tmp_path):
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from jit_ui.browser.session import BrowserActionError, BrowserSession
+
+    site = {"site_id": "web", "start_url": "https://youtbe.com/", "allowed_origin": "https://youtbe.com"}
+    session = BrowserSession(Settings(_env_file=None), tmp_path, site)
+
+    mock_page = MagicMock()
+    mock_page.url = "about:blank"
+    mock_page.title = AsyncMock(return_value="")
+    mock_page.goto = AsyncMock(side_effect=[
+        Exception("Page.goto: net::ERR_NAME_NOT_RESOLVED at https://youtbe.com/"),
+        Exception("Page.goto: net::ERR_NAME_NOT_RESOLVED at https://youtube.com/"),
+    ])
+    mock_page.on = MagicMock()
+    mock_page.set_default_timeout = MagicMock()
+
+    with patch("playwright.async_api.async_playwright") as mock_pw:
+        pw_instance = AsyncMock()
+        pw_instance.stop = AsyncMock()
+        mock_pw.return_value.start = AsyncMock(return_value=pw_instance)
+        browser = AsyncMock()
+        browser.close = AsyncMock()
+        pw_instance.chromium.launch = AsyncMock(return_value=browser)
+        context = AsyncMock()
+        browser.new_context = AsyncMock(return_value=context)
+        context.new_page = AsyncMock(return_value=mock_page)
+        cdp = MagicMock()
+        cdp.on = MagicMock()
+        cdp.detach = AsyncMock()
+        cdp.send = AsyncMock()
+        context.new_cdp_session = AsyncMock(return_value=cdp)
+
+        with pytest.raises(BrowserActionError) as exc_info:
+            await session.open()
+
+        assert "Unable to resolve domain 'youtbe.com' (net::ERR_NAME_NOT_RESOLVED). Check the URL spelling and your internet connection." in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_browser_session_execute_dns_error_raises_clean_browser_action_error(tmp_path):
+    from unittest.mock import AsyncMock, MagicMock
+    from jit_ui.browser.session import BrowserActionError, BrowserSession
+    from jit_ui.domain.models import ActionSpec
+
+    site = {"site_id": "web", "start_url": "https://example.org/", "allowed_origin": "https://example.org"}
+    session = BrowserSession(Settings(_env_file=None), tmp_path, site)
+
+    mock_page = MagicMock()
+    mock_page.url = "about:blank"
+    mock_page.title = AsyncMock(return_value="")
+    mock_page.evaluate = AsyncMock(return_value="")
+    mock_page.locator = MagicMock(return_value=MagicMock(inner_text=AsyncMock(return_value=""), first=MagicMock(wait_for=AsyncMock())))
+    mock_page.goto = AsyncMock(side_effect=Exception("Page.goto: net::ERR_NAME_NOT_RESOLVED at https://bad-domain.example/"))
+    session.page = mock_page
+
+    action = ActionSpec(action="goto", url="https://bad-domain.example/")
+    with pytest.raises(BrowserActionError) as exc_info:
+        await session.execute(action, {})
+
+    assert "Unable to resolve domain 'bad-domain.example' (net::ERR_NAME_NOT_RESOLVED). Check the URL spelling and your internet connection." in str(exc_info.value)

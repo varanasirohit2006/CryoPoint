@@ -8,7 +8,59 @@ import re
 import ipaddress
 import math
 import time
-from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse, unquote_plus
+from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse, unquote_plus, urlsplit, urlunsplit
+
+
+NETWORK_NAVIGATION_ERRORS = (
+    "ERR_NAME_NOT_RESOLVED",
+    "ERR_NAME_RESOLUTION_FAILED",
+    "ERR_CONNECTION_REFUSED",
+    "ERR_CONNECTION_TIMED_OUT",
+    "ERR_INTERNET_DISCONNECTED",
+)
+
+DOMAIN_TYPO_MAP = {
+    "youtbe.com": "youtube.com",
+    "yotube.com": "youtube.com",
+    "uoutube.com": "youtube.com",
+    "youtub.com": "youtube.com",
+    "goole.com": "google.com",
+    "gogle.com": "google.com",
+    "gooogle.com": "google.com",
+    "amzon.com": "amazon.com",
+    "amazn.com": "amazon.com",
+    "amazone.com": "amazon.com",
+    "amzon.in": "amazon.in",
+    "amazn.in": "amazon.in",
+    "amazone.in": "amazon.in",
+    "flikart.com": "flipkart.com",
+    "flikart.in": "flipkart.in",
+    "githb.com": "github.com",
+    "wikpedia.org": "wikipedia.org",
+    "wikpedia.com": "wikipedia.org",
+}
+
+
+def correct_domain_typo(host: str) -> str:
+    if not host:
+        return host
+    host_lower = host.lower()
+    if host_lower in DOMAIN_TYPO_MAP:
+        return DOMAIN_TYPO_MAP[host_lower]
+    for typo, corrected in DOMAIN_TYPO_MAP.items():
+        if host_lower.endswith("." + typo):
+            prefix = host_lower[:-len(typo)]
+            return prefix + corrected
+    return host
+
+
+def extract_net_error_code(exc: Exception) -> str | None:
+    text = str(exc)
+    for err in NETWORK_NAVIGATION_ERRORS:
+        if err in text:
+            match = re.search(r"(?:net::)?(ERR_[A-Z_]+)", text)
+            return f"net::{match.group(1)}" if match else f"net::{err}"
+    return None
 
 
 class SiteBlockedError(RuntimeError):
@@ -287,16 +339,38 @@ async def detect_blocking(page, site=None):
     if not amazon and not general_web:
         return
     address = page.url.lower()
-    text = (await page.locator("body").inner_text(timeout=5000)).lower()
+    try:
+        text = (await page.locator("body").inner_text(timeout=5000)).lower()
+    except Exception:
+        text = ""
+    try:
+        title = (await page.title()).lower()
+    except Exception:
+        title = ""
     if amazon and (any(fragment in address for fragment in ("validatecaptcha", "/ap/cvf"))
                    or ("/ap/signin" in address and not general_web)):
         raise SiteBlockedError("Amazon requires a CAPTCHA, authentication, or verification.")
     if general_web and host in {"google.com", "www.google.com", "google.co.in", "www.google.co.in"} and "/sorry/" in address:
         raise SiteBlockedError("Google requires an access verification challenge.")
-    if any(fragment in text for fragment in (
-        "verify that you're not a robot", "enter the characters you see", "robot check",
-        "sorry, we just need to make sure you're not a robot", "automated access",
+    if any(fragment in title for fragment in (
+        "robot check", "just a moment...", "attention required! | cloudflare", "security challenge",
+        "human verification", "are you a robot", "i am not a robot", "i'm not a robot", "captcha", "ddos protection",
     )):
+        if "robot" in title or "captcha" in title:
+            raise SiteBlockedError("The website presented an 'I am not a robot' verification challenge." if general_web else "Amazon presented an 'I am not a robot' verification challenge.")
+        raise SiteBlockedError("The website presented an access verification challenge." if general_web else "Amazon presented an access verification challenge.")
+    if any(fragment in text for fragment in (
+        "verify that you're not a robot", "verify that you are not a robot", "verify you are not a robot",
+        "verify you're not a robot", "i'm not a robot", "i am not a robot", "i am not robot", "i'm not robot",
+        "enter the characters you see", "robot check",
+        "sorry, we just need to make sure you're not a robot", "automated access",
+        "verify you are human", "verify that you are human", "confirm you are human",
+        "confirm that you are human", "press and hold to show you're not a robot",
+        "press & hold to confirm you are human", "unusual traffic from your computer network",
+        "check the box to prove you're human", "complete the security check",
+    )):
+        if any(term in text for term in ("robot", "characters you see")):
+            raise SiteBlockedError("The website presented an 'I am not a robot' verification challenge." if general_web else "Amazon presented an 'I am not a robot' verification challenge.")
         raise SiteBlockedError("The website presented an access verification challenge." if general_web else "Amazon presented an access verification challenge.")
 
 
@@ -324,9 +398,15 @@ def permitted_url(address, site):
     if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username is not None or parsed.password is not None:
         return False
     if site.get("site_id") != "web":
-        return origin == site["allowed_origin"]
+        return origin == site.get("allowed_origin") or origin in (site.get("allowed_origins") or [])
     explicit = site.get("allowed_origin") or origin_of(site.get("start_url", ""))
-    if origin == explicit:
+    allowed_origins = set(site.get("allowed_origins") or [])
+    if explicit:
+        allowed_origins.add(explicit)
+    start = site.get("start_url") or site.get("target_url")
+    if start:
+        allowed_origins.add(origin_of(start))
+    if origin in allowed_origins:
         return True
     host = parsed.hostname.lower().rstrip(".")
     if host == "localhost" or host.endswith((".localhost", ".local", ".internal")):
@@ -475,14 +555,44 @@ async def apply_action(page, action, parameters, site, timeout_ms=800):
         if not permitted_url(address, site):
             raise StepExecutionError("Navigation outside the registered site is not permitted.")
         await enforce_amazon_search({**action, "url": address}, None, site)
-        response = await page.goto(address, wait_until="domcontentloaded", timeout=30000)
+        try:
+            response = await page.goto(address, wait_until="domcontentloaded", timeout=30000)
+        except Exception as exc:
+            err_code = extract_net_error_code(exc)
+            if err_code:
+                hostname = urlsplit(address).hostname or address
+                corrected_host = correct_domain_typo(hostname)
+                if corrected_host and corrected_host != hostname:
+                    parsed = urlsplit(address)
+                    corrected_authority = corrected_host + (f":{parsed.port}" if parsed.port and parsed.port not in (80, 443) else "")
+                    corrected_address = urlunsplit((parsed.scheme, corrected_authority, parsed.path or "/", parsed.query, parsed.fragment))
+                    try:
+                        if site.get("allowed_origins") is not None:
+                            site["allowed_origins"].append(origin_of(corrected_address))
+                        site["allowed_origin"] = origin_of(corrected_address)
+                        site["target_url"] = corrected_address
+                        if "start_url" in site:
+                            site["start_url"] = corrected_address
+                        action["url"] = corrected_address
+                        response = await page.goto(corrected_address, wait_until="domcontentloaded", timeout=30000)
+                    except Exception as retry_exc:
+                        retry_code = extract_net_error_code(retry_exc) or err_code
+                        raise StepExecutionError(
+                            f"Unable to resolve domain '{hostname}' ({retry_code}). Check the URL spelling and your internet connection."
+                        ) from retry_exc
+                else:
+                    raise StepExecutionError(
+                        f"Unable to resolve domain '{hostname}' ({err_code}). Check the URL spelling and your internet connection."
+                    ) from exc
+            else:
+                raise
         site["_document_status"] = response.status if response else None
         if site.get("site_id") == "amazon_in" and not await temporary_page_error(page, site):
             await page.locator("input,button,a,select").first.wait_for(state="attached", timeout=5000)
         await detect_blocking(page, site)
         record_search_evidence(page, parameters, site)
         return
-    if not permitted_url(page.url, site):
+    if page.url and page.url != "about:blank" and not permitted_url(page.url, site):
         raise StepExecutionError("The browser left the registered site.")
     if kind == "scroll":
         amount = int(action.get("value") or 500)
@@ -503,14 +613,35 @@ async def apply_action(page, action, parameters, site, timeout_ms=800):
     if site.get("site_id") == "web" and (kind == "click" or (kind == "press" and action.get("value") == "Enter")):
         destination = await target.evaluate("""element => {
             const anchor = element.closest('a[href]');
-            if (anchor) return anchor.href;
-            const form = element.closest('form');
+            if (anchor) {
+                const href = anchor.getAttribute('href') || anchor.getAttribute('xlink:href');
+                return href !== null ? href : (typeof anchor.href === 'string' ? anchor.href : (anchor.href?.baseVal || null));
+            }
+            const form = element.form || element.closest('form');
             const submitting = element.matches('button:not([type]),button[type="submit"],input[type="submit"]')
                 || element.matches('input,textarea');
-            return form && submitting ? form.action : null;
+            if (submitting) {
+                const formaction = element.getAttribute && element.getAttribute('formaction');
+                if (formaction !== null) return formaction;
+            }
+            if (form && submitting) {
+                const actionAttr = form.getAttribute('action');
+                if (actionAttr !== null) return actionAttr;
+                if (typeof form.action === 'string') return form.action;
+                return '';
+            }
+            return null;
         }""")
-        if destination and not permitted_url(destination, site):
-            raise StepExecutionError("This link or form points outside permitted public navigation.")
+        if destination is not None and isinstance(destination, str):
+            dest = destination.strip()
+            # In-page actions (empty href, # anchors, javascript:) and non-HTTP schemes
+            # (mailto:, tel:, blob:) must never be blocked.
+            if dest and not dest.startswith("#") and not dest.lower().startswith("javascript:"):
+                base_url = page.url if page.url and page.url != "about:blank" else (site.get("start_url") or site.get("target_url") or "")
+                resolved = urljoin(base_url, dest)
+                parsed_dest = urlparse(resolved)
+                if parsed_dest.scheme in ("http", "https") and not permitted_url(resolved, site):
+                    raise StepExecutionError("This link or form points outside permitted public navigation.")
     value = resolve_value(action, parameters, site)
     activated_name = None
     if kind == "click" or (kind == "press" and value in {"Enter", "Space"}):

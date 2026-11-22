@@ -31,16 +31,18 @@ function Stop-JitRecordedServices {
         $jitIdentities += @{ pid = $jitService.pid; started_at = $jitService.started_at }
         foreach ($jitIdentity in $jitIdentities) {
             $jitProcess = Get-Process -Id $jitIdentity.pid -ErrorAction SilentlyContinue
-            if ($jitProcess -and $jitProcess.StartTime.ToUniversalTime().Ticks -eq ([datetime]$jitIdentity.started_at).ToUniversalTime().Ticks) {
-                try {
-                    Stop-Process -Id $jitProcess.Id -ErrorAction Stop
-                    $jitProcess.WaitForExit(3000) | Out-Null
+            try {
+                if ($jitProcess -and $jitProcess.StartTime.ToUniversalTime().Ticks -eq ([datetime]$jitIdentity.started_at).ToUniversalTime().Ticks) {
+                    try {
+                        Stop-Process -Id $jitProcess.Id -ErrorAction Stop
+                        $jitProcess.WaitForExit(3000) | Out-Null
+                    }
+                    catch {
+                        $jitStillRunning = Get-Process -Id $jitIdentity.pid -ErrorAction SilentlyContinue
+                        if ($jitStillRunning -and $jitStillRunning.StartTime.ToUniversalTime().Ticks -eq ([datetime]$jitIdentity.started_at).ToUniversalTime().Ticks) { throw }
+                    }
                 }
-                catch {
-                    $jitStillRunning = Get-Process -Id $jitIdentity.pid -ErrorAction SilentlyContinue
-                    if ($jitStillRunning -and $jitStillRunning.StartTime.ToUniversalTime().Ticks -eq ([datetime]$jitIdentity.started_at).ToUniversalTime().Ticks) { throw }
-                }
-            }
+            } catch { }
         }
         Write-Host "Stopped $($jitService.name)."
     }

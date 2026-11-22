@@ -11,7 +11,7 @@ import re
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from jit_ui.config.settings import Settings
 from jit_ui.domain.models import ActionFrame, ActionSpec, ConditionSpec, ElementFingerprint, LocatorSpec, Observation
@@ -75,6 +75,8 @@ class BrowserSession:
             self.artifact_dir.mkdir(parents=True, exist_ok=True)
             self._playwright = await async_playwright().start()
             launch: dict[str, Any] = {"headless": self.settings.browser_headless}
+            if not self.settings.browser_headless:
+                launch["args"] = ["--start-maximized"]
             if self.settings.chromium_path:
                 launch["executable_path"] = self.settings.chromium_path
             self._browser = await self._playwright.chromium.launch(**launch)
@@ -89,7 +91,37 @@ class BrowserSession:
             self._tracer = NetworkTracer(self._cdp)
             await self._tracer.start()
             if not self.defer_navigation:
-                await self.page.goto(self.site["start_url"], wait_until="domcontentloaded", timeout=30000)
+                start_url = self.site["start_url"]
+                try:
+                    await self.page.goto(start_url, wait_until="domcontentloaded", timeout=30000)
+                except Exception as exc:
+                    from jit_ui.runtime.browser_helpers import correct_domain_typo, extract_net_error_code, origin_of
+                    err_code = extract_net_error_code(exc)
+                    if err_code:
+                        hostname = urlsplit(start_url).hostname or start_url
+                        corrected_host = correct_domain_typo(hostname)
+                        if corrected_host and corrected_host != hostname:
+                            parsed = urlsplit(start_url)
+                            corrected_authority = corrected_host + (f":{parsed.port}" if parsed.port and parsed.port not in (80, 443) else "")
+                            corrected_address = urlunsplit((parsed.scheme, corrected_authority, parsed.path or "/", parsed.query, parsed.fragment))
+                            try:
+                                if self.site.get("allowed_origins") is not None:
+                                    self.site["allowed_origins"].append(origin_of(corrected_address))
+                                self.site["allowed_origin"] = origin_of(corrected_address)
+                                self.site["start_url"] = corrected_address
+                                self.site["target_url"] = corrected_address
+                                await self.page.goto(corrected_address, wait_until="domcontentloaded", timeout=30000)
+                            except Exception as retry_exc:
+                                retry_code = extract_net_error_code(retry_exc) or err_code
+                                raise BrowserActionError(
+                                    f"Unable to resolve domain '{hostname}' ({retry_code}). Check the URL spelling and your internet connection."
+                                ) from retry_exc
+                        else:
+                            raise BrowserActionError(
+                                f"Unable to resolve domain '{hostname}' ({err_code}). Check the URL spelling and your internet connection."
+                            ) from exc
+                    else:
+                        raise
             if not self.defer_navigation and self.site.get("site_id") in {"shop", "admin"}:
                 await self.page.locator("input,button,a,select,textarea").first.wait_for(state="visible", timeout=5000)
             elif not self.defer_navigation and self.site.get("site_id") == "amazon_in":
@@ -98,11 +130,21 @@ class BrowserSession:
                     await self.page.locator("input,button,a,select").first.wait_for(state="attached", timeout=5000)
             await self._check_blocked()
             return self
+        except BrowserActionError:
+            await self.close()
+            raise
         except SiteBlocked:
             await self.close()
             raise
         except Exception as exc:
             await self.close()
+            from jit_ui.runtime.browser_helpers import extract_net_error_code
+            err_code = extract_net_error_code(exc)
+            if err_code:
+                hostname = urlsplit(self.site.get("start_url", "")).hostname or self.site.get("start_url", "")
+                raise BrowserActionError(
+                    f"Unable to resolve domain '{hostname}' ({err_code}). Check the URL spelling and your internet connection."
+                ) from exc
             raise BrowserActionError("Unable to open Chromium or the target site. Install Playwright Chromium and verify the local testbed.") from exc
 
     async def close(self) -> None:
@@ -130,7 +172,9 @@ class BrowserSession:
                     message = str(exc) + (" Enable 'Show browser for manual steps' to complete verification and resume." if self.site.get("site_id") == "web" else "")
                     raise SiteBlocked(message) from exc
                 message = ("Verification is still pending. " if resumed else "") + str(exc)
-                await self._manual_step(message, "Verification still pending" if resumed else "Manual verification required")
+                is_robot = any(k in str(exc).lower() for k in ("robot", "captcha"))
+                label = "Verification still pending" if resumed else ("I am not a robot verification" if is_robot else "Manual verification required")
+                await self._manual_step(message, label)
                 resumed = True
 
     async def _manual_step(self, message, label="Manual verification required"):
@@ -373,7 +417,22 @@ class BrowserSession:
                 frame.post_conditions = [ConditionSpec(kind="url_contains", expected=urlsplit(frame.after_url).path)]
             return frame
         except Exception as exc:
-            frame.error = self._redact(str(exc))[:1500]
+            from jit_ui.runtime.browser_helpers import StepExecutionError, extract_net_error_code
+            net_code = extract_net_error_code(exc)
+            if net_code and not isinstance(exc, (StepExecutionError, BrowserActionError)):
+                candidate_urls = [getattr(action, "url", None), self.page.url if self.page else None, self.site.get("start_url", "")]
+                hostname = None
+                for u in candidate_urls:
+                    if u and u != "about:blank":
+                        host = urlsplit(u).hostname
+                        if host:
+                            hostname = host
+                            break
+                if not hostname:
+                    hostname = self.site.get("start_url", "") or "unknown"
+                frame.error = f"Unable to resolve domain '{hostname}' ({net_code}). Check the URL spelling and your internet connection."
+            else:
+                frame.error = self._redact(str(exc))[:1500]
             with suppress(Exception):
                 frame.after_url, frame.after_hash = await self._state()
             failure = BrowserActionError(frame.error, frame)

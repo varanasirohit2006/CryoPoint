@@ -23,7 +23,16 @@ TEXT = "open youtube.com and search for gta 6 trailer . press subscribe the acco
 RESULT = {"search_query":"gta 6 trailer", "objectives":["Search for gta 6 trailer", "Press Subscribe on the matching channel"]}
 
 
-@pytest.mark.parametrize("suffix", [". press subscribe the account", "and then subscribe to the channel", "; tap the subscribe button", "then follow the account", "\npress Subscribe"])
+@pytest.mark.parametrize("suffix", [
+    ". press subscribe the account",
+    "and then subscribe to the channel",
+    "; tap the subscribe button",
+    "then follow the account",
+    "\npress Subscribe",
+    ".after this download the output file",
+    "and convert the pdf to word",
+    ". use the upload to upload file",
+])
 def test_followup_operations_are_not_search_keywords(suffix):
     task = validate_task(TaskRequest(site_id="web", task="open youtube.com and search for gta 6 trailer " + suffix), Settings(_env_file=None))
     assert task.goal_id == "browser_task"
@@ -66,6 +75,36 @@ async def test_ollama_decoding_preserves_usage_and_explicit_search_values():
         assert applied.parameters["query"] == "official trailer"
         assert applied.task == TEXT and applied.objectives == RESULT["objectives"]
         assert usage.input_tokens + usage.output_tokens == 160 and usage.attempts == 1
+
+
+def test_apply_interpretation_prunes_derived_query_when_search_query_is_null():
+    text = (
+        "in thehttps://www.ilovepdf.com/pdf_to_word search for i love pdf pdf to word converter "
+        "and convert the pdf to word . use the upload to upload dummy_invoice pdf in the downloads dir "
+        "and convert this pdf to  word .after this download the output word and save it in downloads.  please fix it ."
+    )
+    derived = validate_task(TaskRequest(site_id="web", task=text), Settings(_env_file=None))
+    assert derived.parameters.get("query") == "i love pdf pdf to word converter"
+
+    # LLM determines destination page is already the converter and needs no in-page search
+    null_search_interpretation = TaskInterpretation(
+        search_query=None,
+        objectives=[
+            "upload dummy_invoice pdf in downloads",
+            "convert pdf to word",
+            "download output word and save it in downloads",
+        ]
+    )
+    applied = apply_interpretation(derived, null_search_interpretation)
+    assert "query" not in applied.parameters
+    assert applied.objectives == null_search_interpretation.objectives
+    assert "<query>" not in applied.intent_key
+    assert "i love pdf pdf to word converter" in applied.intent_key
+
+    # Explicit parameters must not be pruned
+    explicit = derived.model_copy(update={"parameter_source": "explicit", "parameters": {"query": "my_query"}})
+    applied_explicit = apply_interpretation(explicit, null_search_interpretation)
+    assert applied_explicit.parameters["query"] == "my_query"
 
 
 def test_search_completion_cannot_skip_the_requested_subscription():

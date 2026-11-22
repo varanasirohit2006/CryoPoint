@@ -241,3 +241,36 @@ async def test_failed_learning_keeps_trace_without_publishing_a_workflow(tmp_pat
     trace = json.loads((tmp_path / "runs" / run.run_id / "trace.json").read_text(encoding="utf-8"))
     assert len(trace) == 1 and trace[0]["action"]["action"] == "wait"
     runtime.repository.close()
+
+
+async def test_web_and_amazon_tasks_always_have_visible_browser_and_manual_handler(tmp_path, monkeypatch):
+    captured_sessions = []
+
+    class CapturingBrowser(Browser):
+        def __init__(self, settings, artifact_dir, site):
+            super().__init__(settings, artifact_dir, site)
+            self.browser_settings = settings
+            self.manual_handler = None
+            self.confirmation_handler = None
+            self.defer_navigation = False
+            captured_sessions.append(self)
+
+    monkeypatch.setattr("jit_ui.runtime.service.explore", learned)
+    runtime = RuntimeService(settings(tmp_path), session_factory=CapturingBrowser, provider_factory=lambda *args: object())
+
+    # Task with interactive=False (default) on web
+    web_task = TaskRequest(site_id="web", goal_id="web_search", target_url="https://example.com/",
+                           task="Search example", parameters={"query": "test"}, interactive=False, mode="cold")
+    await runtime.execute(RunRecord(request=web_task))
+    assert len(captured_sessions) == 1
+    assert captured_sessions[0].browser_settings.browser_headless is False
+    assert captured_sessions[0].manual_handler is not None
+
+    # Task with interactive=False (default) on amazon_in
+    amazon_task = TaskRequest(site_id="amazon_in", goal_id="search_products",
+                              task="Search backpacks", parameters={"query": "backpacks"}, interactive=False, mode="cold")
+    await runtime.execute(RunRecord(request=amazon_task))
+    assert len(captured_sessions) == 2
+    assert captured_sessions[1].browser_settings.browser_headless is False
+    assert captured_sessions[1].manual_handler is not None
+    runtime.repository.close()

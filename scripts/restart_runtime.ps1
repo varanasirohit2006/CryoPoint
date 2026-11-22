@@ -8,7 +8,7 @@ if (-not $jitRuntime) { throw 'Start project services with scripts/dev.ps1 first
 Stop-JitRecordedServices -Services @($jitRuntime)
 $env:PLAYWRIGHT_BROWSERS_PATH = Join-Path $jitProject '.data\browsers'
 $env:PYTHONPATH = (Join-Path $jitProject 'backend\src') + ';' + $jitProject
-$jitProcess = Start-Process -FilePath (Join-Path $jitProject '.venv\Scripts\python.exe') -ArgumentList @('-m', 'uvicorn', 'jit_ui.api.main:app', '--host', '127.0.0.1', '--port', '8000') -WorkingDirectory $jitProject -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $jitProject '.data\logs\runtime-api.out.log') -RedirectStandardError (Join-Path $jitProject '.data\logs\runtime-api.err.log')
+$jitProcess = Start-Process -FilePath (Join-Path $jitProject '.venv\Scripts\python.exe') -ArgumentList @('-m', 'uvicorn', 'jit_ui.api.main:app', '--host', '127.0.0.1', '--port', '8000') -WorkingDirectory $jitProject -WindowStyle Minimized -PassThru -RedirectStandardOutput (Join-Path $jitProject '.data\logs\runtime-api.out.log') -RedirectStandardError (Join-Path $jitProject '.data\logs\runtime-api.err.log')
 $jitRecord = @{ name='runtime-api'; pid=$jitProcess.Id; started_at=$jitProcess.StartTime.ToUniversalTime().ToString('o') }
 $jitState.services = @($jitState.services | Where-Object { $_.name -ne 'runtime-api' }) + @($jitRecord)
 $jitState | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $jitStatePath -Encoding utf8

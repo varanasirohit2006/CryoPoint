@@ -140,3 +140,155 @@ async def test_web_auth_page_is_available_but_shopping_auth_and_captcha_stay_blo
                 await detect_blocking(page, site)
         finally:
             await browser.close()
+
+
+@browser_test
+async def test_inpage_actions_and_relative_navigation_permitted_on_web():
+    site = {"site_id": "web", "start_url": "https://example.com/", "allowed_origin": "https://example.com"}
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch()
+        try:
+            context = await browser.new_context()
+            html = """<!doctype html><html><body>
+                <a id="hash-link" href="#section">Hash link</a>
+                <a id="js-link" href="javascript:void(0)">JS link</a>
+                <a id="empty-link" href="">Empty link</a>
+                <a id="mailto-link" href="mailto:test@example.com">Mailto link</a>
+                <a id="rel-link" href="/relative/path">Relative link</a>
+                <a id="public-link" href="https://example.org/public">Public link</a>
+                <a id="private-ip-link" href="http://192.168.1.1/admin">Private IP link</a>
+                <form id="rel-form" action="/search">
+                    <button id="form-btn" type="submit">Search</button>
+                    <button id="formaction-btn" type="submit" formaction="/custom/search">Custom Search</button>
+                    <button id="private-formaction-btn" type="submit" formaction="http://192.168.1.1/blocked">Private Submit</button>
+                </form>
+                <form id="no-action-form">
+                    <button id="no-action-btn" type="submit">Submit</button>
+                </form>
+                <form id="detached-form" action="/detached-query"></form>
+                <button id="detached-btn" form="detached-form" type="submit">Detached Button</button>
+                <form id="named-action-form" action="/query">
+                    <input name="action" value="shadowed">
+                    <input id="input-enter" name="q" value="test">
+                    <button id="named-action-btn" type="submit">Submit Query</button>
+                </form>
+                <div style="margin:20px 0">
+                    <svg width="200" height="50"><a id="svg-link" href="/svg/target"><text x="10" y="25">SVG Link</text></a></svg>
+                </div>
+            </body></html>"""
+            await context.route("**", lambda route: route.fulfill(content_type="text/html", body=html))
+            page = await context.new_page()
+            await apply_action(page, {"action": "goto", "url": "https://example.com/"}, {}, site)
+
+            # In-page actions must never be blocked
+            for link_id in ("#hash-link", "#js-link", "#empty-link", "#mailto-link"):
+                await apply_action(page, {"action": "click", "locators": [{"strategy": "css", "value": link_id}]}, {}, site)
+
+            # Relative links, SVG links, and forms must resolve against page.url and succeed
+            await apply_action(page, {"action": "click", "locators": [{"strategy": "css", "value": "#rel-link"}]}, {}, site)
+            await apply_action(page, {"action": "click", "locators": [{"strategy": "css", "value": "#public-link"}]}, {}, site)
+            await apply_action(page, {"action": "click", "locators": [{"strategy": "css", "value": "#svg-link"}]}, {}, site)
+            await apply_action(page, {"action": "click", "locators": [{"strategy": "css", "value": "#form-btn"}]}, {}, site)
+            await apply_action(page, {"action": "click", "locators": [{"strategy": "css", "value": "#formaction-btn"}]}, {}, site)
+            await apply_action(page, {"action": "click", "locators": [{"strategy": "css", "value": "#detached-btn"}]}, {}, site)
+            await apply_action(page, {"action": "click", "locators": [{"strategy": "css", "value": "#no-action-btn"}]}, {}, site)
+            await apply_action(page, {"action": "click", "locators": [{"strategy": "css", "value": "#named-action-btn"}]}, {}, site)
+            await apply_action(page, {"action": "press", "value": "Enter", "locators": [{"strategy": "css", "value": "#input-enter"}]}, {}, site)
+
+            # Links and form actions to private destinations must still be blocked
+            with pytest.raises(StepExecutionError, match="outside permitted public navigation"):
+                await apply_action(page, {"action": "click", "locators": [{"strategy": "css", "value": "#private-ip-link"}]}, {}, site)
+            with pytest.raises(StepExecutionError, match="outside permitted public navigation"):
+                await apply_action(page, {"action": "click", "locators": [{"strategy": "css", "value": "#private-formaction-btn"}]}, {}, site)
+        finally:
+            await browser.close()
+
+
+@browser_test
+async def test_detect_blocking_recognizes_various_robot_and_human_challenges():
+    site = {"site_id": "web", "start_url": "https://example.com/", "allowed_origin": "https://example.com"}
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch()
+        try:
+            context = await browser.new_context()
+            await context.route("**", lambda route: route.fulfill(content_type="text/html", body="<html><body><p>Clean page</p></body></html>"))
+            page = await context.new_page()
+            await apply_action(page, {"action": "goto", "url": "https://example.com/"}, {}, site)
+            await detect_blocking(page, site)  # Should not raise
+
+            # Text challenges
+            for challenge_phrase in (
+                "I am not robot",
+                "I'm not a robot",
+                "Please verify you are human",
+                "Confirm that you are human",
+                "Press and hold to show you're not a robot",
+                "Unusual traffic from your computer network",
+            ):
+                await page.locator("body").evaluate("(element, phrase) => { element.innerText = phrase; }", challenge_phrase)
+                with pytest.raises(SiteBlockedError):
+                    await detect_blocking(page, site)
+
+            # Title challenges
+            await page.locator("body").evaluate("element => { element.innerText = 'Some neutral content'; }")
+            for challenge_title in ("Just a moment...", "Attention Required! | Cloudflare", "Robot Check", "Human Verification", "Are you a robot", "Captcha"):
+                await page.evaluate("(title) => { document.title = title; }", challenge_title)
+                with pytest.raises(SiteBlockedError):
+                    await detect_blocking(page, site)
+        finally:
+            await browser.close()
+
+
+async def test_check_blocked_labels_robot_vs_general_manual_verification(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock, MagicMock
+    from jit_ui.browser import BrowserSession
+    from jit_ui.config import Settings
+
+    captured_reviews = []
+
+    async def mock_manual_handler(review):
+        captured_reviews.append(review)
+
+    site = {"site_id": "web", "start_url": "https://example.com/", "allowed_origin": "https://example.com"}
+    session = BrowserSession(Settings(testbed_url="http://127.0.0.1:3000", artifact_dir=tmp_path / "artifacts"), tmp_path, site)
+    session.manual_handler = mock_manual_handler
+
+    mock_page = MagicMock()
+    mock_page.url = "https://example.com/challenge"
+    mock_page.screenshot = AsyncMock()
+    mock_page.locator.return_value = MagicMock()
+    session.page = mock_page
+
+    # 1. Robot challenge: initial notification must be labeled "I am not a robot verification"
+    call_count = 0
+
+    async def mock_detect_robot(page, s):
+        nonlocal call_count
+        call_count += 1
+        if call_count <= 2:
+            raise SiteBlockedError("The website presented an 'I am not a robot' verification challenge.")
+
+    monkeypatch.setattr("jit_ui.runtime.browser_helpers.detect_blocking", mock_detect_robot)
+    await session._check_blocked()
+
+    assert len(captured_reviews) == 2
+    assert captured_reviews[0]["label"] == "I am not a robot verification"
+    assert "I am not a robot" in captured_reviews[0]["details"]
+    assert captured_reviews[1]["label"] == "Verification still pending"
+
+    # 2. General manual verification: labeled "Manual verification required"
+    captured_reviews.clear()
+    call_count = 0
+
+    async def mock_detect_general(page, s):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise SiteBlockedError("Fixture requires a manual verification step.")
+
+    monkeypatch.setattr("jit_ui.runtime.browser_helpers.detect_blocking", mock_detect_general)
+    await session._check_blocked()
+
+    assert len(captured_reviews) == 1
+    assert captured_reviews[0]["label"] == "Manual verification required"
+
